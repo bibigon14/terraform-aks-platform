@@ -104,6 +104,10 @@ Full end-to-end chain, from PR plan through five fixes to a running cluster, is 
 ![PR #1 merged](docs/screenshots/06-github-pr1-merged.png)
 ![Apply complete with outputs](docs/screenshots/11-apply-success-outputs.png)
 
+Lifecycle completes with a clean teardown:
+
+![Terraform Destroy success](docs/screenshots/13-terraform-destroy-success.png)
+
 
 ## Walkthrough
 
