@@ -1,0 +1,93 @@
+# Workload Identity demo pod
+#
+# Applied against the AKS cluster this repo provisions, this pod receives
+# a projected ServiceAccount token that Azure AD exchanges for an access
+# token tied to the user-assigned Managed Identity federated via the
+# modules/workload-identity-sa Terraform module.
+#
+# No secret, no password, no service principal key material is stored in
+# the cluster. The projected token is minted per-pod by the API server,
+# scoped to this SA, with a short TTL.
+#
+# Preconditions (satisfied by this repo's terraform apply):
+#   - AKS has oidc_issuer_enabled = true and workload_identity_enabled = true
+#   - A UserAssignedIdentity is federated to subject
+#     "system:serviceaccount:default:demo-workload"
+#   - The ServiceAccount is annotated with the UAI's clientId
+#     (which is terraform output workload_identity_demo_client_id)
+#
+# Apply:
+#   # paste the client_id from terraform output into the SA annotation,
+#   # or render it with yq / envsubst:
+#   CLIENT_ID=$(terraform output -raw workload_identity_demo_client_id)
+#   sed "s/__CLIENT_ID__/$CLIENT_ID/" workload-identity-demo.yaml | kubectl apply -f -
+#
+# Verify:
+#   kubectl logs -n default deploy/wi-demo
+#
+# A working pod shows an AAD token acquisition in the logs with no
+# AZURE_CLIENT_SECRET or AZURE_FEDERATED_TOKEN mounted into the container
+# environment - only AZURE_CLIENT_ID + AZURE_TENANT_ID + AZURE_FEDERATED_TOKEN_FILE.
+#
+# Cleanup:
+#   kubectl delete -f workload-identity-demo.yaml
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: demo-workload
+  namespace: default
+  annotations:
+    azure.workload.identity/client-id: "__CLIENT_ID__"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wi-demo
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wi-demo
+  template:
+    metadata:
+      labels:
+        app: wi-demo
+        azure.workload.identity/use: "true"   # opts into AAD WI token injection
+    spec:
+      serviceAccountName: demo-workload
+      containers:
+        - name: azcli
+          image: mcr.microsoft.com/azure-cli:2.90.0
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              echo "=== Environment projected by Workload Identity ==="
+              env | grep -E '^AZURE_(CLIENT_ID|TENANT_ID|FEDERATED_TOKEN_FILE|AUTHORITY_HOST)=' | sort
+              echo ""
+              echo "=== Projected token file ==="
+              ls -l "$AZURE_FEDERATED_TOKEN_FILE"
+              echo ""
+              echo "=== Attempting Azure CLI federated login ==="
+              az login --federated-token "$(cat "$AZURE_FEDERATED_TOKEN_FILE")" \
+                       --service-principal \
+                       --username "$AZURE_CLIENT_ID" \
+                       --tenant "$AZURE_TENANT_ID" \
+                       --allow-no-subscriptions
+              echo ""
+              echo "=== Account info ==="
+              az account show
+              echo ""
+              echo "=== Idling so you can kubectl exec in ==="
+              sleep infinity
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi

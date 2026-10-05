@@ -230,3 +230,121 @@ workflow:
 
 A `gh run rerun <RUN_ID>` on the failed workflow is enough to re-trigger
 without a dummy commit.
+
+## Kubernetes version regional deprecation - gotcha
+
+If `terraform apply` fails on first cluster creation with:
+
+    Error: creating Kubernetes Cluster ...
+    "code": "K8sVersionNotSupported",
+    "message": "Managed cluster is on version 1.30.14 which is not supported
+    in this region. Please use [az aks get-versions] command..."
+
+The repo's `kubernetes_version` variable was set to a minor (`"1.30"`), AKS auto-selected the latest patch (`1.30.14`), and that patch has been deprecated in the chosen region.
+
+AKS deprecates patch versions on a rolling schedule. A minor that is `GenerallyAvailable` globally can be `Deprecated` in a specific region within weeks. The `az aks get-versions` output is authoritative:
+
+    az aks get-versions --location westus3 -o table | head -20
+
+Pick a currently-supported minor from the top of that list and bump the variable:
+
+    variable "kubernetes_version" {
+      type    = string
+      default = "1.35"
+    }
+
+Commit, push, re-approve the apply workflow.
+
+## Free trial VM size restrictions - gotcha
+
+If `terraform apply` fails during cluster creation with:
+
+    "code": "BadRequest",
+    "message": "The VM size of Standard_B2s is not allowed in your
+    subscription in location 'westus3'. The available VM sizes are
+    'standard_d128ds_v7,standard_d128lds_v7,...' [list of ~400 SKUs]
+    For more details, please visit https://aka.ms/aks/quotas-skus-regions"
+
+Free trial subscriptions explicitly deny the entire B-series (burstable, cheapest tier) in several regions. The allowed list includes every D-, E-, F-, HB-, L-, M-, NC- and NV-series SKU - just not the cheap one most AKS quickstarts default to.
+
+Pick a D-series equivalent that is on the allowed list and under the free trial budget. `Standard_D2s_v4` is a good default: 2 vCPU, 8 GB RAM, ~$0.10/hr on-demand, present in every US region's free-trial allowlist.
+
+    variable "node_vm_size" {
+      type    = string
+      default = "Standard_D2s_v4"
+    }
+
+A pay-as-you-go subscription has no such restriction - B-series is normally cheapest. If you upgrade off the free trial, bump this back down for cost.
+
+## AAD-enabled AKS requires kubelogin - gotcha
+
+Right after `az aks get-credentials`, `kubectl` fails with:
+
+    Unable to connect to the server: getting credentials: exec: executable
+    kubelogin not found
+
+    It looks like you are trying to use a client-go credential plugin that
+    is not installed.
+
+    kubelogin is not installed which is required to connect to AAD enabled
+    cluster.
+
+AKS clusters with `azure_active_directory_role_based_access_control` enabled (which this repo does) authenticate via Azure AD. The kubeconfig that `az aks get-credentials` writes expects a `kubelogin` binary to be on PATH to broker the AAD token exchange.
+
+Install:
+
+    # recommended on macOS
+    brew install Azure/kubelogin/kubelogin
+
+    # or via az (writes to /usr/local/bin, may need sudo)
+    az aks install-cli
+
+Then convert the kubeconfig to use the current Azure CLI session instead of interactive device-code login:
+
+    kubelogin convert-kubeconfig -l azurecli
+
+After this, `kubectl` picks up a token from `az login` silently. The `--admin` flag on `az aks get-credentials` is a fallback that bypasses AAD and uses cluster-local certificates, but it does not respect Azure RBAC and should not be used past bootstrap.
+
+## Self-service RBAC admin bootstrap - gotcha
+
+After `kubelogin convert-kubeconfig`, `kubectl get nodes` returns:
+
+    Error from server (Forbidden): nodes is forbidden: User
+    "<your-object-id>" cannot list resource "nodes" in API group "" at
+    the cluster scope: User does not have access to the resource in Azure.
+    Update role assignment to allow access.
+
+With `azure_rbac_enabled = true` and `admin_group_object_ids = []`, nobody has cluster-level roles by default. The Terraform deploy service principal has `Role Based Access Control Administrator` at subscription scope (it can grant roles) but has no cluster role of its own, and neither does the signed-in user.
+
+Grant yourself cluster admin on just this cluster:
+
+    USER_OBJECT_ID=$(az ad signed-in-user show --query id -o tsv)
+    CLUSTER_ID=$(az aks show -g rg-aks-platform-demo -n aks-aks-platform-demo --query id -o tsv)
+
+    az role assignment create \
+      --assignee $USER_OBJECT_ID \
+      --role "Azure Kubernetes Service RBAC Cluster Admin" \
+      --scope $CLUSTER_ID
+
+Azure RBAC propagation is 2 to 5 minutes. If `kubectl get nodes` still returns 403 after assignment, wait and retry rather than re-granting.
+
+For teams, replace this manual step with an Entra ID group whose members get the role automatically. Pass the group's object ID to `admin_group_object_ids` in `terraform.tfvars` and let Terraform create the role assignment itself:
+
+    variable "admin_group_object_ids" {
+      type    = list(string)
+      default = ["00000000-0000-0000-0000-000000000000"]  # your Entra ID group
+    }
+
+## Full gotcha chain summary
+
+One bootstrap of this repo against a fresh free-trial Azure subscription surfaced five distinct failures that any production-grade AKS deploy pattern will eventually have to answer. In chronological order:
+
+| # | Where | Failure | Root cause | Fix |
+|---|-------|---------|------------|-----|
+| 1 | PR `plan` | `AADSTS700213: No matching federated identity record` | GitHub emits customized OIDC subject with `@USER_ID/REPO@REPO_ID` segments; FC registered with the documented bare `OWNER/REPO` form | Delete + recreate FCs with the actual subject the error prints |
+| 2 | `apply` #1 | `K8sVersionNotSupported` version 1.30.14 | AKS auto-resolved `kubernetes_version="1.30"` to a patch that is deprecated in `westus3` | Bump minor to a currently-supported one (`az aks get-versions`) |
+| 3 | `apply` #2 | `BadRequest: Standard_B2s not allowed` | Free trial subscriptions deny B-series in several regions | Use `Standard_D2s_v4` or any other on-allowlist SKU |
+| 4 | post-deploy | `kubelogin not found` | AAD-enabled clusters write kubeconfigs that require `kubelogin` for token exchange | `brew install kubelogin` + `kubelogin convert-kubeconfig -l azurecli` |
+| 5 | post-deploy | `Forbidden: User does not have access` | Nobody has cluster-level Azure RBAC role; deploy SP can grant but has no cluster role itself | `az role assignment create` for `Azure Kubernetes Service RBAC Cluster Admin` on current user |
+
+Four of five were caught by CI before any resource was actually created or in a bad state. The fifth is a post-deploy user-side setup, not a cluster health issue. None of the five is documented in a single place in Microsoft's AKS quickstart.
