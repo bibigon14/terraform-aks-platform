@@ -146,3 +146,87 @@ The next step is opening a PR with these Terraform files - the `plan` workflow s
     az group delete -n $TF_RG --yes --no-wait
 
 The App Registration goes to a 30-day recycle bin before permanent deletion. If re-bootstrapping within that window, use `az ad app list --show-mine` and `az ad app restore --id` instead of creating a new one.
+## OIDC subject claim format - gotcha
+
+If `azure/login@v2` fails on the first PR plan run with:
+
+    AADSTS700213: No matching federated identity record found for presented
+    assertion subject 'repo:OWNER@USER_ID/REPO@REPO_ID:pull_request'
+
+GitHub Actions is emitting a **customized** subject claim with embedded
+numeric IDs instead of the documented `repo:OWNER/REPO:pull_request` form.
+This happens on accounts (personal or organization) where GitHub has rolled
+out immutable actor identifiers in the OIDC token.
+
+Microsoft Learn and most example repos show the plain format - which Azure
+AD then refuses because the actual presented claim does not match. The fix
+is to register federated credentials with the exact subject the error
+message prints, including the `@USER_ID` and `@REPO_ID` segments.
+
+The three cross-cloud bootstraps hit identical gotchas:
+
+- **AWS (EKS)** - CloudTrail event showed `repo:OWNER@ID/REPO@ID:ref:refs/...`
+  being presented, STS AssumeRoleWithWebIdentity rejected the standard-format
+  trust policy. Fix: trust policy condition had to match the actual sub.
+- **GCP (GKE)** - Workload Identity Pool subject attribute mapping defaults
+  to `assertion.sub`, same mismatch surfaced as
+  `Error 400: identity pool subject does not match`.
+- **Azure (AKS)** - this `AADSTS700213` error from `azure/login`.
+
+### How to find the correct subject
+
+The actual claim is in the Azure CLI error output under
+`Federated token details`:
+
+    Federated token details:
+     issuer - https://token.actions.githubusercontent.com
+     subject claim - repo:bibigon14@3174950/terraform-aks-platform@1405097511:pull_request
+     audience - api://AzureADTokenExchange
+
+Alternatively, extract from the GitHub token programmatically inside a
+workflow:
+
+    - name: Dump OIDC token subject
+      run: |
+        TOKEN=$(curl -sH "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+          "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" \
+          | jq -r .value)
+        echo $TOKEN | cut -d. -f2 | base64 -d 2>/dev/null | jq .sub
+
+### Fix (delete + recreate - subject is immutable on an FC)
+
+    export GH_USER_ID=3174950
+    export GH_REPO_ID=1405097511
+
+    az ad app federated-credential delete \
+      --id $APP_ID \
+      --federated-credential-id github-pr
+
+    az ad app federated-credential delete \
+      --id $APP_ID \
+      --federated-credential-id github-production
+
+    cat > /tmp/fc-pr.json <<EOF
+    {
+      "name": "github-pr",
+      "issuer": "https://token.actions.githubusercontent.com",
+      "subject": "repo:${GH_OWNER}@${GH_USER_ID}/${GH_REPO}@${GH_REPO_ID}:pull_request",
+      "description": "GitHub Actions - PR plan runs",
+      "audiences": ["api://AzureADTokenExchange"]
+    }
+    EOF
+    az ad app federated-credential create --id $APP_ID --parameters /tmp/fc-pr.json
+
+    cat > /tmp/fc-prod.json <<EOF
+    {
+      "name": "github-production",
+      "issuer": "https://token.actions.githubusercontent.com",
+      "subject": "repo:${GH_OWNER}@${GH_USER_ID}/${GH_REPO}@${GH_REPO_ID}:environment:production",
+      "description": "GitHub Actions - production apply/destroy",
+      "audiences": ["api://AzureADTokenExchange"]
+    }
+    EOF
+    az ad app federated-credential create --id $APP_ID --parameters /tmp/fc-prod.json
+
+A `gh run rerun <RUN_ID>` on the failed workflow is enough to re-trigger
+without a dummy commit.
