@@ -1,0 +1,39 @@
+# Terraform
+.terraform/
+# Note: .terraform.lock.hcl SHOULD be committed to pin provider versions.
+
+# State files - never committed, always lives in the remote backend
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Plan files
+*.tfplan
+
+# Local overrides and tfvars (bootstrap values stay in bootstrap.md and env vars)
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Crash logs
+crash.log
+crash.*.log
+
+# Credentials / keys - defense in depth, nothing should land here anyway
+*.pem
+*.key
+*.p12
+*.pfx
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
