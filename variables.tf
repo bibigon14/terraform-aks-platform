@@ -31,7 +31,7 @@ variable "node_count" {
 variable "node_vm_size" {
   description = "VM size for AKS nodes"
   type        = string
-  default     = "Standard_B2s"
+  default     = "Standard_D2s_v4"
 }
 
 variable "admin_group_object_ids" {
