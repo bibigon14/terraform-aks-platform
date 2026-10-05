@@ -19,7 +19,7 @@ variable "environment" {
 variable "kubernetes_version" {
   description = "AKS Kubernetes version (minor only; AKS picks the current patch)"
   type        = string
-  default     = "1.30"
+  default     = "1.35"
 }
 
 variable "node_count" {

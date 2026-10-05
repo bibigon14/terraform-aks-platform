@@ -14,10 +14,9 @@ resource "azurerm_user_assigned_identity" "this" {
 }
 
 resource "azurerm_federated_identity_credential" "this" {
-  name                = "${var.name}-federated-credential"
-  resource_group_name = var.resource_group_name
-  parent_id           = azurerm_user_assigned_identity.this.id
-  audience            = ["api://AzureADTokenExchange"]
-  issuer              = var.oidc_issuer_url
-  subject             = "system:serviceaccount:${var.namespace}:${var.service_account_name}"
+  name      = "${var.name}-federated-credential"
+  parent_id = azurerm_user_assigned_identity.this.id
+  audience  = ["api://AzureADTokenExchange"]
+  issuer    = var.oidc_issuer_url
+  subject   = "system:serviceaccount:${var.namespace}:${var.service_account_name}"
 }
