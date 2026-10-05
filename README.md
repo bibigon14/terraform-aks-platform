@@ -6,6 +6,29 @@ Designed to be `apply`ed, demoed, and `destroy`ed the same day. Not a long-runni
 
 Companion to [terraform-eks-platform](https://github.com/bibigon14/terraform-eks-platform) and [terraform-gke-platform](https://github.com/bibigon14/terraform-gke-platform) - same shape, different cloud.
 
+## Real bug caught by CI
+
+The first PR plan run on this repo failed inside `azure/login` with:
+
+```
+Federated token details:
+ subject claim - repo:bibigon14@3174950/terraform-aks-platform@1405097511:pull_request
+
+##[error]AADSTS700213: No matching federated identity record found for
+presented assertion subject
+'repo:bibigon14@3174950/terraform-aks-platform@1405097511:pull_request'.
+```
+
+The federated credentials had been created from the documented subject format - `repo:OWNER/REPO:pull_request` - but GitHub Actions on this account was emitting a **customized** claim with embedded user and repo IDs: `repo:OWNER@USER_ID/REPO@REPO_ID:pull_request`. Azure AD refused the token because the subject on the FC did not match the subject in the presented assertion.
+
+**Root cause**. GitHub is rolling out immutable actor identifiers in OIDC tokens to accounts over time - personal and organization both. When the feature is active for an account, the plain `repo:OWNER/REPO:...` subject documented in every Azure quickstart does not match the claim that is actually presented. There is no override on the GitHub side; the fix is to register federated credentials with the exact subject the Azure CLI error prints.
+
+Remediation (delete + recreate - subject is immutable on an existing FC) is documented in [bootstrap.md](bootstrap.md#oidc-subject-claim-format---gotcha).
+
+**Why this matters**. Local `terraform plan` and `validate` are both clean. The bug lives in the gap between CI-side OIDC token minting and Azure AD's federated-identity matching - a layer no local tool exercises. Catching it at PR plan time left the stack in a clean state; without the plan gate, the same error would have surfaced on `terraform apply` after the resource group and storage account were already changing.
+
+The same claim-format drift has fired on all three cross-cloud bootstraps in this portfolio - AWS (STS `AssumeRoleWithWebIdentity`), GCP (Workload Identity Pool subject attribute mapping), and now Azure. The surfaces are different, the root cause is one.
+
 ## Walkthrough
 
 _TODO: Added after first clean end-to-end apply._
