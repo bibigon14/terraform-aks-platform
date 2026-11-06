@@ -1,12 +1,6 @@
 name: Terraform Apply
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - '.github/**/*.md'
   workflow_dispatch:
 
 permissions:
